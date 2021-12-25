@@ -34,6 +34,7 @@ class Proxy:
         while self.active:
             if not self.send_queue.empty():
                 (packet, dst) = self.send_queue.get()
+                # print("packet", len(packet), packet)
                 if self.upload_rate:
                     time.sleep(len(packet) / self.upload_rate)
                 self.socket.sendto(packet, dst)
