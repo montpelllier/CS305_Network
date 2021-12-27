@@ -18,9 +18,18 @@ if __name__ == '__main__':
     C = PClient(tracker_address, upload_rate=100000, download_rate=100000)
     data2 = C.download(fid)
 
+    # data3 = open("../test_files/alice.txt", "rb")
+    # if data1 == data3:
+    #     print("data1 is correct")
+    # if data2 == data3:
+    #     print("data2 is correct")
+
     if data1 == data2:
         print("Success!")
     else:
+        # print("data1: ", len(data1))
+        # print("----------------------------------------------------------------------------------")
+        # print("data2: ",len(data2))
         raise RuntimeError
 
     B.close()

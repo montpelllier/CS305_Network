@@ -37,7 +37,11 @@ class Proxy:
                 # print("packet", len(packet), packet)
                 if self.upload_rate:
                     time.sleep(len(packet) / self.upload_rate)
-                self.socket.sendto(packet, dst)
+                try:
+                    self.socket.sendto(packet, dst)
+                except:
+                    print("dst:", dst, packet)
+                    raise Exception
             else:
                 time.sleep(0.000001)
 

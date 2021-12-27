@@ -6,8 +6,9 @@ from Project2.SC_model.client import Client
 from Project2.SC_model.server import Server
 
 tracker_address = ("127.0.0.1", 10086)
-
-file_path = "../test_files/bg.png"
+#"../test_files/bg.png"
+#"../test_files/alice.txt"
+file_path =  "../test_files/bg.png"
 
 def client_download(client):
     client.download(file_path)

@@ -1,26 +1,17 @@
+import hashlib
 import math
 import random
-import threading
 import time
+from threading import Thread
 
 from Project2.Proxy import Proxy
-import hashlib
-from threading import Thread
 
 chunk_size = 16000
 
 
-# def torrent(file_path):  # 根据文件内容生成hash值作为fid
-#     with open(file_path, 'rb') as f:
-#         data = f.read()
-#     ret = hashlib.md5(data).hexdigest()
-#     length = math.ceil(len(data) / chunk_len)
-#     return ret, length
-
-
 class PClient:
     def __init__(self, tracker_addr: (str, int), proxy=None, port=None, upload_rate=0, download_rate=0):
-        self.start = None
+
         if proxy:
             self.proxy = proxy
         else:
@@ -28,17 +19,24 @@ class PClient:
 
         self.tracker = tracker_addr
         self.online_thread = Thread(target=self.online)
-        self.chunk_thread = Thread(target=self.update_chunks)
+        self.upload_thread = Thread(target=self.upload)
 
         self.online_flag = True  # 结束线程
-        self.local_data = {}  # 本地储存的文件
-        self.downloading_state = {}  # 下载状态
-        self.client_list = {}  # 可请求的节点队列
-        self.fast_client = {}
-        self.reg_state = {}  # 标注注册的文件状态，是否成功注册
+        self.local_data = {}  # 本地储存的文件 fid-[chunk]
+        self.neighbor_client = {}  # 邻居节点队列 fid-[client]
+        self.fast_client = {}  # 最快的节点 fid-[client]
+        self.neighbor_chunk = {}  # 邻居节点拥有的块 fid-[chunk-[client]]
+        self.accept = {}  # fid-[bool]
+        self.p2p_state = {} # 标注自己是否还在网络
+        # self.downloading_state = {}  # 下载状态
+        # self.client_list = {}  # 邻居节点队列
+        # self.fast_client = {}  # 发送的节点
+        # self.reg_state = {}  # 标注注册的文件状态，是否成功注册
+
+        # self.send_queue = {}
 
         self.online_thread.start()
-        self.chunk_thread.start()
+        self.upload_thread.start()
 
     def __send__(self, data: bytes, dst: (str, int)):
         """
@@ -59,6 +57,11 @@ class PClient:
         """
         return self.proxy.recvfrom(timeout)
 
+    @staticmethod
+    def str_to_client(client_str) -> (str, int):
+        client_str = client_str[1:-1]
+        return client_str.split(",")[0].split("\"")[1], int(client_str.split(", ")[1])
+
     def register(self, file_path: str):
         """
         Share a file in P2P network
@@ -75,47 +78,23 @@ class PClient:
         length = math.ceil(len(data) / chunk_size)
         fid = file + "#" + str(length)  # 生成fid
 
-        reg_msg = b'REGISTER:' + fid.encode()
-        self.__send__(reg_msg, self.tracker)
-        self.reg_state[fid] = False
-        self.local_data[fid] = data  # 本地文件
+        self.p2p_state[fid] = True
+        self.neighbor_client[fid] = []
+        self.fast_client[fid] = []
+        self.accept[fid] = [False for _ in range(length)]
+        self.neighbor_chunk[fid] = [[] for _ in range(length)]
+        self.local_data[fid] = [None for _ in range(length)]
 
-        while not self.reg_state[fid]:
-            time.sleep(0.001)
+        reg_msg = b'JOIN:' + fid.encode()
+        self.__send__(reg_msg, self.tracker)  # 注册
+
+        for i in range(length):
+            self.local_data[fid][i] = data[i * chunk_size: i * chunk_size + chunk_size]
+        # 本地文件
         """
         End of your code
         """
         return fid
-
-    def ask(self):
-        for fid in self.local_data.keys():
-            if isinstance(self.local_data[fid], list):  # 还在下载
-                for client in self.client_list[fid]:
-                    ask_msg = b'ASK:' + fid.encode()
-                    self.__send__(ask_msg, client)
-
-    def update_chunks(self):
-        while True:
-            if not self.online_flag:
-                break
-            self.ask()
-            time.sleep(10)
-
-    def scarce_chunk(self, fid) -> int:
-        id_list, i, length, = [], 0, math.inf
-        for chunk in self.local_data[fid]:
-            if isinstance(chunk, list) and len(chunk) > 0:
-                if len(chunk) == length:
-                    id_list.append(i)
-                elif len(chunk) < length:
-                    length = len(chunk)
-                    id_list.clear()
-                    id_list.append(i)
-            i += 1
-        try:
-            return random.choice(id_list)
-        except:
-            return -1
 
     def download(self, fid) -> bytes:
         """
@@ -123,56 +102,34 @@ class PClient:
         :param fid: the unique identification of the expected file, should be the same type of the return value of share()
         :return: the whole received file in bytes
         """
+        data = None
         """
         Start your code below!
         """
         length = int(fid.split("#")[1])
-        self.local_data[fid] = [[] for _ in range(length)]
-        self.client_list[fid] = []
-        self.fast_client[fid] = {}  # client-speed
-        ask_once, candidate = True, None
 
-        while isinstance(self.local_data[fid], list):
-            if not self.client_list[fid]:
-                query_msg = "QUERY:" + fid  # 从tracker获取client表
-                self.__send__(query_msg.encode(), self.tracker)
+        self.neighbor_chunk[fid] = [[] for _ in range(length)]
+        self.local_data[fid] = [None for _ in range(length)]
+        self.accept[fid] = [True for _ in range(length)]
+        self.p2p_state[fid] = True
+        self.fast_client[fid] = []
+        self.neighbor_client[fid] = []
 
-            while not self.client_list[fid]:
-                time.sleep(0.001)
 
-            if ask_once:
-                self.ask()
-                ask_once = False
+        self.__send__(b'JOIN:' + fid.encode(), self.tracker)
 
-            if candidate is None:
-                candidate = self.client_list[fid][0]
-
-            id = -1
-            while id == -1:
-                id = self.scarce_chunk(fid)
-                time.sleep(0.001)
-
-            chunk_req = fid + "-" + str(id)
-            self.downloading_state[chunk_req] = True
-
-            request = "REQUEST:" + chunk_req
-            self.__send__(request.encode(), candidate)
-            while self.downloading_state[chunk_req]:
-                time.sleep(0.001)
-
-            temp, isComplete = b'', True
+        while True:
+            time.sleep(0.5)
+            data, isComplete = b'', True
             for chunk in self.local_data[fid]:
-                if isinstance(chunk, list):
+                if chunk is None:
                     isComplete = False
                     break
                 else:
-                    temp += chunk
+                    data += chunk
             if isComplete:
-                self.local_data[fid] = temp
-
-        reg_msg = "REGISTER:" + fid
-        self.__send__(reg_msg.encode(), self.tracker)
-        data = self.local_data[fid]
+                print(self.proxy.port, "download finish")
+                break
         """
         End of your code
         """
@@ -186,8 +143,10 @@ class PClient:
         """
         cancel_msg = "CANCEL:" + fid
         self.__send__(cancel_msg.encode(), self.tracker)
-        while self.reg_state[fid]:
-            time.sleep(0.001)
+        while self.p2p_state[fid]:
+            time.sleep(0.05)
+        self.neighbor_client.pop(fid)
+        self.fast_client.pop(fid)
         """
         End of your code
         """
@@ -197,16 +156,51 @@ class PClient:
         Completely stop the client, this client will be unable to share or download files any more
         :return: You can design as your need
         """
-        for fid in self.reg_state.keys():
+        file_list = list(self.neighbor_client.keys())
+        for fid in file_list:
             self.cancel(fid)
         self.online_flag = False
-        self.chunk_thread.join()
-        self.online_thread.join()
-        print("closed!")
+        print(self.proxy.port, "closed!")
         """
         End of your code
         """
         self.proxy.close()
+
+    def upload(self):
+        while True:
+            if not self.online_flag:
+                break
+            time.sleep(0.05)
+            for fid in self.local_data:
+                i = 0
+                rare_chunk = []
+                num = math.inf
+                node = None
+                for chunk in self.local_data[fid]:
+                    if chunk is not None and fid in self.neighbor_chunk:
+                        if len(self.neighbor_chunk[fid][i]) < num:
+                            num = len(self.neighbor_chunk[fid][i])
+                            rare_chunk = [i]
+                        elif len(self.neighbor_chunk[fid][i]) == num:
+                            rare_chunk.append(i)
+                    i += 1
+                # 搜索稀缺资源
+                if rare_chunk:
+                    i = random.choice(rare_chunk)  # 随机选一个
+                    if fid not in self.fast_client:
+                        continue
+                    for client in self.fast_client[fid]:
+                        if fid not in self.neighbor_chunk:
+                            continue
+                        if client not in self.neighbor_chunk[fid][i]:
+                            node = PClient.str_to_client(client)
+                            self.neighbor_chunk[fid][i].append(client)
+                            # print(type(node), node)
+                            break
+                    if node is not None:  # 询问要不要
+                        upload_msg = "UPLOAD:" + fid + "-" + str(i)
+                        # print(self.proxy.port, upload_msg)
+                        self.__send__(upload_msg.encode(), node)
 
     def online(self):
         while True:
@@ -219,90 +213,56 @@ class PClient:
             # msg, client = msg.decode(), "(\"%s\", %d)" % frm
             client = "(\"%s\", %d)" % frm
 
-            if msg.startswith(b'REQUEST:'):
-                fid, chunk_id = msg[8:].decode().split("-")
-                chunk, chunk_id = b'', int(chunk_id)
-                if fid in self.local_data:
-                    if not isinstance(self.local_data[fid], list):  # 完整文件
-                        chunk = self.local_data[fid][chunk_id * chunk_size:chunk_id * chunk_size + chunk_size]
-                    elif not isinstance(self.local_data[fid][chunk_id], list):  # 正在下载
-                        chunk = self.local_data[fid][chunk_id]
+            if msg.startswith(b'JOIN:'):
+                fid, nodes = msg[5:].decode().split(":")
+                nodes = nodes.split("-")
+                for node in nodes:
+                    if node == '':
+                        continue
+                    self.neighbor_client[fid].append(node)
+                    self.fast_client[fid].append(node)
+                # 新节点加入网络
 
-                back_msg = b'REQUEST-BACK:' + msg[8:] + b':' + chunk
-                self.__send__(back_msg, frm)
+                #print(self.proxy.port, self.fast_client[fid])
 
-            elif msg.startswith(b'REQUEST-BACK:'):
+            elif msg.startswith(b'UPLOAD:'):
+                chunk_id = msg[7:]
+                fid, id = chunk_id.decode().split("-")
+                if client not in self.neighbor_chunk[fid][int(id)]:
+                    self.neighbor_chunk[fid][int(id)].append(client)
 
-                chunk_id = msg[13:].split(b':')[0].decode()  # str
-                chunk = msg[14 + len(chunk_id):]  # byte
-                print("From", client, self.proxy.port, chunk_id)
-                self.downloading_state[chunk_id] = False
-                if chunk:
-                    fid, id = chunk_id.split("-")
-                    self.local_data[fid][int(id)] = chunk
-            elif msg.startswith(b'REGISTER:'):
-                state, fid = msg[9:].decode().split(",")
-                if state == "Success":
-                    self.reg_state[fid] = True
-            elif msg.startswith(b'CANCEL:'):
-                state, fid = msg[7:].decode().split(",")
-                if state == "Success":
-                    self.reg_state[fid] = False
-            elif msg.startswith(b'ASK:'):  # 询问拥有的片段
-                fid = msg[4:].decode()
-                chunk_list = []
-                if fid in self.local_data.keys():
-                    if isinstance(self.local_data[fid], list):  # 还在下载
-                        left, right, last = 0, 0, None
-                        for chunk in self.local_data[fid]:
-                            if not isinstance(chunk, list) and isinstance(last, list):
-                                left = right
-                            elif isinstance(chunk, list) and not isinstance(last, list):
-                                chunk_list.append((left, right))  # 打包
-                            last, right = chunk, right + 1
-                            if right == len(self.local_data[fid]) and chunk is not None:
-                                chunk_list.append((left, right))
-                    else:
-                        length = int(fid.split("#")[1])
-                        chunk_list.append((0, length))
-                back_msg = "ASK-BACK:" + fid + ":" + str(chunk_list)
-                self.__send__(back_msg.encode(), frm)
-            elif msg.startswith(b'QUERY-BACK:'):
-                fid, msg = msg[11:].decode().split(":")
-                owner = msg[2:-2].split("), (")
-                if owner != ['']:
-                    if fid not in self.client_list:
-                        self.client_list[fid] = []
-                    for c in owner:
-                        client = c.split(",")[0].split("\"")[1], int(c.split(", ")[1])
-                        if int(c.split(", ")[1]) != self.proxy.port:
-                            self.client_list[fid].append(client)
-                # consider the first owner as the candidate
+                if self.accept[fid][int(id)]:  # 接受
+                    self.accept[fid][int(id)] = False
+                    back_msg = b'WANT:' + chunk_id
+                    self.__send__(back_msg, frm)
+                    # 通知邻居节点
+                    for c in self.neighbor_client[fid]:
+                        if c != client:
+                            node = PClient.str_to_client(c)
+                            have_msg = b'HAVE:' + chunk_id
+                            self.__send__(have_msg, node)
 
-            elif msg.startswith(b'ASK-BACK:'):
+            elif msg.startswith(b'WANT:'):
+                chunk_id = msg[5:]
+                fid, id = chunk_id.decode().split("-")
+                chunk = self.local_data[fid][int(id)]
+                data_msg = b'DATA:' + chunk_id + b':' + chunk
+                self.__send__(data_msg, frm)
 
-                fid, msg = msg[9:].decode().split(":")
-                ranges = msg[2:-2].split("), (")
-                length = int(fid.split("#")[1])
-                has_chunk = [False for _ in range(length)]
+            elif msg.startswith(b'HAVE:'):
+                chunk_id = msg[5:].decode()
+                fid, id = chunk_id.split("-")
+                self.neighbor_chunk[fid][int(id)].append(client)  # 记录拥有情况
 
-                if isinstance(self.local_data[fid], list):  # 文件还在下载
-                    for r in ranges:
-                        left, right = int(r.split(", ")[0]), int(r.split(", ")[1])
-                        for i in range(left, right):
-                            has_chunk[i] = True
-                    # 有哪些chunk
-                    i = 0
-                    for chunk in self.local_data[fid]:
-                        if isinstance(chunk, list):  # 文件块还在下载
-                            if has_chunk[i]:  # 有该文件块
-                                if client not in chunk:  # 添加client
-                                    self.local_data[fid][i].append(client)
-                            elif client in chunk:  # 删除client
-                                self.local_data[fid][i].remove(client)
-                        i += 1
-
-
+            elif msg.startswith(b'DATA:'):
+                chunk_id = msg[5:].split(b':')[0]
+                print(self.proxy.port, "from", frm, chunk_id)
+                chunk = msg[6 + len(chunk_id):]
+                fid, id = chunk_id.decode().split("-")
+                self.local_data[fid][int(id)] = chunk
+            elif msg.startswith(b'CANCEL-BACK:'):
+                fid = msg[12:].decode()
+                self.p2p_state[fid] = False
             else:
                 print("unexpected message:", msg)
 
